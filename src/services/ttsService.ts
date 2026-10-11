@@ -66,10 +66,53 @@ export function normalizeTamilForSpeech(text: string): string {
 }
 
 class TTSService {
+  // Shared persistent audio element to comply with mobile Safari / Chrome autoplay blessing
+  private sharedAudioElement: HTMLAudioElement | null = null;
   private currentAudioElement: HTMLAudioElement | null = null;
   private audioCache = new Map<string, string>();
   private activeSequenceId = 0;
   private isCancelled = false;
+  private isAudioUnlocked = false;
+
+  private getOrCreateAudio(): HTMLAudioElement | null {
+    if (typeof window === 'undefined') return null;
+    if (!this.sharedAudioElement) {
+      this.sharedAudioElement = new Audio();
+      this.sharedAudioElement.setAttribute('playsinline', 'true');
+      this.sharedAudioElement.setAttribute('webkit-playsinline', 'true');
+      this.sharedAudioElement.preload = 'auto';
+    }
+    return this.sharedAudioElement;
+  }
+
+  // Bless and unlock mobile browser audio on touch / click gesture
+  public unlockAudio() {
+    if (this.isAudioUnlocked) return;
+    if (typeof window === 'undefined') return;
+
+    try {
+      const audio = this.getOrCreateAudio();
+      if (audio) {
+        // Silent 1-sample WAV to bless HTML5 Audio on mobile
+        audio.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+        audio
+          .play()
+          .then(() => {
+            audio.pause();
+            this.isAudioUnlocked = true;
+          })
+          .catch(() => {
+            // Will re-attempt on next user gesture
+          });
+      }
+
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.getVoices();
+      }
+    } catch {
+      // Ignore
+    }
+  }
 
   // Get available browser voices for Tamil
   public getBrowserTamilVoices(): SpeechSynthesisVoice[] {
@@ -123,41 +166,67 @@ class TTSService {
     this.activeSequenceId++;
 
     if (this.currentAudioElement) {
-      this.currentAudioElement.pause();
-      this.currentAudioElement.currentTime = 0;
+      try {
+        this.currentAudioElement.pause();
+        this.currentAudioElement.currentTime = 0;
+      } catch {
+        // Ignore
+      }
       this.currentAudioElement = null;
     }
 
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      window.speechSynthesis.cancel();
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // Ignore
+      }
     }
   }
 
-  // Play audio via HTML5 Audio element
-  private playAudioElement(audioUrl: string, rate: number, volume: number): Promise<void> {
+  // Play audio via blessed persistent HTML5 Audio element
+  private playAudioElement(audioUrl: string, rate: number, volume: number): Promise<boolean> {
     return new Promise((resolve) => {
-      const audio = new Audio(audioUrl);
+      const audio = this.getOrCreateAudio();
+      if (!audio) {
+        resolve(false);
+        return;
+      }
+
       this.currentAudioElement = audio;
-      audio.playbackRate = Math.max(0.75, Math.min(1.5, rate));
-      audio.volume = Math.max(0, Math.min(1, volume));
 
-      audio.onended = () => {
+      let isFinished = false;
+      const cleanup = (success: boolean) => {
+        if (isFinished) return;
+        isFinished = true;
+        audio.onended = null;
+        audio.onerror = null;
         if (this.currentAudioElement === audio) {
           this.currentAudioElement = null;
         }
-        resolve();
+        resolve(success);
       };
 
-      audio.onerror = () => {
-        if (this.currentAudioElement === audio) {
-          this.currentAudioElement = null;
+      audio.onended = () => cleanup(true);
+      audio.onerror = () => cleanup(false);
+
+      try {
+        audio.src = audioUrl;
+        audio.currentTime = 0;
+        audio.playbackRate = Math.max(0.75, Math.min(1.5, rate));
+        audio.volume = Math.max(0, Math.min(1, volume));
+
+        const playPromise = audio.play();
+        if (playPromise !== undefined) {
+          playPromise.catch((err) => {
+            console.warn('Mobile audio play error (will fallback to WebSpeech):', err);
+            cleanup(false);
+          });
         }
-        resolve();
-      };
-
-      audio.play().catch(() => {
-        resolve();
-      });
+      } catch (err) {
+        console.warn('Audio setup error:', err);
+        cleanup(false);
+      }
     });
   }
 
@@ -174,7 +243,6 @@ class TTSService {
         return;
       }
 
-      window.speechSynthesis.cancel();
       const cleanText = normalizeTamilForSpeech(text);
       const utterance = new SpeechSynthesisUtterance(cleanText);
       utterance.lang = 'ta-IN';
@@ -182,7 +250,10 @@ class TTSService {
       utterance.pitch = 1.0;
       utterance.volume = Math.max(0, Math.min(1, volume));
 
-      // Try selecting designated voice or any Tamil voice
+      // Global reference to prevent garbage collection silences on iOS Safari
+      (window as unknown as { __ttsUtterance?: SpeechSynthesisUtterance }).__ttsUtterance = utterance;
+
+      // Select matching or Tamil voice if present
       const voices = window.speechSynthesis.getVoices();
       if (voiceURI) {
         const matchingVoice = voices.find((v) => v.voiceURI === voiceURI);
@@ -198,13 +269,18 @@ class TTSService {
         if (tamilVoice) utterance.voice = tamilVoice;
       }
 
-      utterance.onend = () => {
+      let isDone = false;
+      const finish = () => {
+        if (isDone) return;
+        isDone = true;
         resolve();
       };
 
-      utterance.onerror = () => {
-        resolve();
-      };
+      utterance.onend = finish;
+      utterance.onerror = finish;
+
+      // Mobile WebKit failsafe timeout (10 seconds)
+      setTimeout(finish, 10000);
 
       window.speechSynthesis.speak(utterance);
     });
@@ -223,18 +299,17 @@ class TTSService {
 
     if (onStart) onStart();
 
+    let played = false;
     // Prefer Authentic Native Tamil Voice
     if (settings.voiceMode === 'natural-ai') {
       const audioUrl = await this.fetchServerTTS(text, settings.geminiVoice);
       if (audioUrl && !this.isCancelled) {
-        await this.playAudioElement(audioUrl, settings.speechRate, settings.volume);
-        if (onEnd) onEnd();
-        return;
+        played = await this.playAudioElement(audioUrl, settings.speechRate, settings.volume);
       }
     }
 
-    // Fallback to Web Speech API with Tamil voice
-    if (!this.isCancelled) {
+    // Fallback to Web Speech API with Tamil voice if AI failed or blocked on mobile
+    if (!played && !this.isCancelled) {
       await this.speakViaWebSpeech(
         text,
         settings.speechRate,
@@ -242,10 +317,11 @@ class TTSService {
         settings.browserVoiceURI
       );
     }
+
     if (onEnd) onEnd();
   }
 
-  // Speak the answer verdict and explanation in rich, authentic natural Tamil
+  // Speak the answer verdict in authentic natural Tamil
   public async speakAnswerVerdict(
     isCorrect: boolean,
     isTimeout: boolean,
@@ -261,9 +337,7 @@ class TTSService {
       return;
     }
 
-    const optionLetter = TAMIL_OPTION_LABELS[optionIndex] || '';
     const spokenAnswer = replaceDigitsWithTamilWords(optionText);
-    const spokenExplanation = explanation ? replaceDigitsWithTamilWords(explanation) : '';
 
     let verdictText = '';
     if (isTimeout) {
@@ -329,11 +403,11 @@ class TTSService {
       if (settings.voiceMode === 'natural-ai') {
         const audioUrl = await this.fetchServerTTS(seg.text, settings.geminiVoice);
         if (audioUrl && !this.isCancelled && this.activeSequenceId === sequenceId) {
-          await this.playAudioElement(audioUrl, settings.speechRate, settings.volume);
-          playedViaAI = true;
+          playedViaAI = await this.playAudioElement(audioUrl, settings.speechRate, settings.volume);
         }
       }
 
+      // If audio wasn't played (e.g. mobile blocked or server error), fallback to WebSpeech
       if (!playedViaAI && !this.isCancelled && this.activeSequenceId === sequenceId) {
         await this.speakViaWebSpeech(
           seg.text,

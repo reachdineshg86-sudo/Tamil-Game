@@ -18,6 +18,17 @@ class SoundEffectsManager {
     return this.ctx;
   }
 
+  public unlock() {
+    try {
+      const ctx = this.getContext();
+      if (ctx && ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
+    } catch {
+      // Ignored if not allowed yet
+    }
+  }
+
   public setMuted(muted: boolean) {
     this.isMuted = muted;
   }

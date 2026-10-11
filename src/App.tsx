@@ -113,6 +113,24 @@ export default function App() {
     soundEffects.setMuted(!audioSettings.soundEffects);
   }, [audioSettings.soundEffects]);
 
+  // Prime and unlock mobile audio on first user touch/click gesture
+  useEffect(() => {
+    const handleUnlock = () => {
+      ttsService.unlockAudio();
+      soundEffects.unlock();
+    };
+
+    window.addEventListener('touchstart', handleUnlock, { passive: true, once: true });
+    window.addEventListener('touchend', handleUnlock, { passive: true, once: true });
+    window.addEventListener('click', handleUnlock, { passive: true, once: true });
+
+    return () => {
+      window.removeEventListener('touchstart', handleUnlock);
+      window.removeEventListener('touchend', handleUnlock);
+      window.removeEventListener('click', handleUnlock);
+    };
+  }, []);
+
   // Handle Question Timeout (15s elapsed)
   const handleTimeOut = useCallback(() => {
     if (isAnsweredRef.current || isPausedRef.current) return;
@@ -281,6 +299,8 @@ export default function App() {
 
   // Start the Game from Welcome Screen (shuffles questions)
   const handleStartGame = () => {
+    ttsService.unlockAudio();
+    soundEffects.unlock();
     soundEffects.playClick();
     setIsGameStarted(true);
     setIsPaused(false);
@@ -354,6 +374,9 @@ export default function App() {
   const handleSelectOption = (idx: number) => {
     if (isAnswered || isPaused) return;
 
+    ttsService.unlockAudio();
+    soundEffects.unlock();
+
     clearAllTimers();
     ttsService.stop();
     setIsSpeaking(false);
@@ -400,6 +423,9 @@ export default function App() {
 
   // Move to Next Question immediately (manual or automatic)
   const handleNextQuestion = useCallback(() => {
+    ttsService.unlockAudio();
+    soundEffects.unlock();
+
     clearAllTimers();
     ttsService.stop();
     setIsSpeaking(false);
@@ -451,6 +477,8 @@ export default function App() {
   // Replay Audio for current question (Pauses timer and re-reads question)
   const handleReplayAudio = () => {
     if (isAnswered || isPaused) return;
+    ttsService.unlockAudio();
+    soundEffects.unlock();
     clearAllTimers();
     soundEffects.playClick();
     setTimeLeft(QUESTION_TIMER_SECONDS);

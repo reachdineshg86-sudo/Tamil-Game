@@ -11,7 +11,7 @@ When creating a **Web Service** on [dashboard.render.com](https://dashboard.rend
 ### 1. Web Service Configuration
 - **Name**: `thiruvalluvar-tamil-quiz` (or any name)
 - **Runtime**: `Node`
-- **Build Command**: `npm install --include=dev && npm run build`
+- **Build Command**: `npm install --legacy-peer-deps && npm run build`
 - **Start Command**: `npm start`
 - **Instance Type**: `Free`
 
